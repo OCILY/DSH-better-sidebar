@@ -4,6 +4,10 @@
 >
 > 📝 The Chinese [CHANGELOG](./CHANGELOG.md) is the authoritative, item-by-item record; this file carries the English summaries and has historically lagged behind it. Where the two disagree, the Chinese one is current.
 
+### Unreleased
+
+- ⚡ **Mermaid previews of large Markdown documents no longer stall the renderer (layout measurement isolated in a sandboxed iframe)**: mermaid measures label text with `SVGElement.getBBox()` against a node appended to `document.body`, so every measurement flushes the whole DSH document layout — measured on a real desktop host at **59–75 ms per measurement** (15,418 nodes) versus **1 ms** in an empty iframe. A 31-diagram document therefore blocked the main thread for >20 s, tripping the desktop shell's surface watchdog and turning tab restoration into a crash loop. Diagrams now render inside a hidden `sandbox="allow-scripts"` iframe (a self-contained blob: document with the mermaid UMD bundle inlined plus a small postMessage protocol); the parent only sends/receives and sanitizes SVG: **per diagram 1,500–7,300 ms → 30–104 ms, 31 diagrams in ~5 s**, while the client mermaid chunk shrinks from **7.04 MB to 3.69 MB**. A shared render queue (visible/near-viewport diagrams first, the rest filled in on `requestIdleCallback`, 16 ms main-thread yields between renders — **every diagram is still rendered, none degrades to a code block**) and fence-line-sized placeholder skeletons complete the change. Design and measurements: [docs/plans/2026-10-23-mermaid-iframe-isolation.md](docs/plans/2026-10-23-mermaid-iframe-isolation.md).
+
 ### v0.28.0
 
 - **Stable plugin support moves to DSH 0.2.1-rc.1+**: all 13 DSH peer floors are `^0.2.1-rc.1`; development dependencies, CI and installers pin the exact RC baseline. No runtime compatibility layer or feature implementation changes are introduced.

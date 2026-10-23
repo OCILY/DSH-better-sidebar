@@ -1907,6 +1907,55 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   height: auto;
 }
 
+/* Lazy render placeholder: the fence's diagram is queued and swaps in as soon
+   as the render queue reaches it (visible diagrams first, the rest while the
+   browser is idle). The min-height comes from the fence's line count so the
+   article does not jump under the reader's cursor when the diagram arrives. */
+.mermaidPending {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 18px 24px;
+}
+
+.mermaidPendingBar {
+  display: block;
+  width: min(320px, 70%);
+  height: 10px;
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-layer-2);
+  animation: mermaidPendingPulse 1.4s ease-in-out infinite;
+}
+
+.mermaidPendingBar:nth-child(2) {
+  width: min(240px, 55%);
+  animation-delay: 0.15s;
+}
+
+.mermaidPendingBar:nth-child(3) {
+  width: min(160px, 40%);
+  animation-delay: 0.3s;
+}
+
+@keyframes mermaidPendingPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mermaidPendingBar {
+    animation: none;
+  }
+}
+
 .mermaidError {
   padding: 6px 10px;
   border-bottom: 1px solid var(--dsw-alias-border-l1);
