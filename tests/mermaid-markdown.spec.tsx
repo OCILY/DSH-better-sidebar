@@ -110,6 +110,7 @@ describe('MermaidMarkdown', () => {
     const { container, root } = await renderMarkdown('```mermaid\ngraph TD\n  A-->B\n```')
     const source = await waitFor(() => container.querySelector('pre code'))
     expect(source?.textContent, 'a failed render keeps the source visible').toContain('graph TD')
+    expect(container.textContent, 'the mermaid error itself is shown, not only a generic label').toContain('boom')
     expect(container.querySelector('[data-mermaid-diagram]'), 'no diagram is injected for a failed render').toBeNull()
     await unmount(root)
   })

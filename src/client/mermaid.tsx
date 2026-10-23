@@ -475,7 +475,12 @@ function MermaidDiagram({ code, owner, initiallyNearViewport }: MermaidDiagramPr
           <span className={css.mermaidPendingBar} />
         </div>
       )}
-      {error !== null && <div className={css.mermaidError} title={error}>{t('mermaidError')}</div>}
+      {error !== null && (
+        <div className={css.mermaidError} title={error}>
+          <span>{t('mermaidError')}</span>
+          <span className={css.mermaidErrorDetail}>{error.split('\n').slice(0, 2).join(' ').slice(0, 240)}</span>
+        </div>
+      )}
       {svg !== null && (
         <div
           className={css.mermaidBody}

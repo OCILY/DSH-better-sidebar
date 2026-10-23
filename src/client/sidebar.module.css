@@ -1972,6 +1972,17 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   font: var(--dsw-font-xxxs-11);
 }
 
+/* The mermaid parse/render message itself: the generic label alone makes a
+   broken fence hard to find, so the first lines follow it (mermaid's full
+   dump stays on the hover title). */
+.mermaidErrorDetail {
+  display: block;
+  margin-top: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* The diagram source shown under a render error (helps fixing the fence). */
 .mermaidCode {
   margin: 0;
