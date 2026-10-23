@@ -2,6 +2,10 @@
 
 > 本文档收录 dsh-better-sidebar 的完整发布历史（最新版摘要见 [README](README_ZH.md)；同步发布于 [GitHub Releases](https://github.com/omdsh-dev/DSH-better-sidebar/releases)）。
 
+### 未发布
+
+- ⚡ **大 Markdown 的 Mermaid 预览不再卡死渲染器（chunk 内测量隔离到沙箱 iframe）**：Mermaid 用 `SVGElement.getBBox()` 量文字，测量节点挂在 `document.body` 上 → 每次测量都刷新整个 DSH 文档布局。真机实测一次 `getBBox` **59–75 ms**（15,418 节点），空 iframe 里只要 **1 ms**；31 张图因此阻塞主线程 >20 s，触发桌面壳看门狗杀渲染器，恢复标签页后循环卡死。现在图表改在隐藏的 `sandbox="allow-scripts"` iframe（blob: 自包含 mermaid UMD + 协议）里渲染，父侧只做 postMessage 收发与 SVG 清洗：**单图 1,500–7,300 ms → 30–104 ms，31 图约 5 s 内完成**，客户端 mermaid chunk 同时从 **7.04 MB → 3.69 MB**。另加共享渲染队列（可见/近视口优先，其余 `requestIdleCallback` 逐张补齐，两次之间让出 16 ms 主线程；**所有图最终都会渲染成图，不再退化为代码块**）与按围栏行数预留高度的占位骨架。设计与实测见 [docs/plans/2026-10-23-mermaid-iframe-isolation.md](docs/plans/2026-10-23-mermaid-iframe-isolation.md)。
+
 ### v0.28.0
 
 - **正式版支持线前移到 DSH 0.2.1-rc.1+**：13 条 DSH peer 下限统一为 `^0.2.1-rc.1`，开发依赖、CI 与安装脚本使用精确 RC 基线。不新增运行时兼容层、不改功能实现。

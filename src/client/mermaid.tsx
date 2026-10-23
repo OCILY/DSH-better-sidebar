@@ -27,7 +27,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot, type Root } from 'react-dom/client'
-import mermaid from 'mermaid'
 import { IconCopyOutlineRegular, MarkdownText, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
 import { markdownTextProps } from './markdown-labels.tsx'
@@ -35,27 +34,100 @@ import { t } from './locales.ts'
 import { sanitizeSvg } from './mermaid-sanitize.ts'
 import type { MermaidMarkdownProps } from './mermaid-blocks.ts'
 import { splitMermaidBlocks } from './mermaid-blocks.ts'
+import { renderMermaidDiagram, type MermaidTheme } from './mermaid-frame.ts'
 import css from './sidebar.module.css'
 
-/** Monotonic id seed: every render call gets a fresh, document-unique id. */
-let mermaidSeq = 0
+/** Render queue priorities: a diagram the reader can see goes first, the rest
+ * render while the browser is idle. */
+type MermaidPriority = 0 | 1
 
-/** Configure mermaid for the current color scheme (idempotent). */
-function configureMermaid(): void {
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    // Labels as real SVG <text>: mermaid's default htmlLabels renders node
-    // text inside <foreignObject>, which the sanitizer strips wholesale —
-    // forcing pure SVG text keeps labels visible and the HTML label channel
-    // closed (strict already escapes label content).
-    htmlLabels: false,
-    // Mermaid 11 renders a large error SVG into document.body before rejecting
-    // invalid diagrams. The component already has its own error fallback, so
-    // suppress that global side effect to keep the DSH shell intact.
-    suppressErrorRendering: true,
-    theme: isDarkScheme() ? 'dark' : 'default',
-  })
+interface MermaidTask {
+  priority: MermaidPriority
+  run: () => Promise<void>
+}
+
+/** Pending renders, shared by every mounted preview on the page. */
+const mermaidQueue: MermaidTask[] = []
+let mermaidPumping = false
+/** Incremented when a test tears the queue down; a drain loop from an older
+ * epoch stops at its next await instead of driving the fresh queue. */
+let mermaidQueueEpoch = 0
+
+/** Drop every queued render and detach the current drain loop (test seam:
+ * module state persists across specs in one vitest file). */
+export function resetMermaidRenderQueueForTests(): void {
+  mermaidQueueEpoch += 1
+  mermaidQueue.length = 0
+  mermaidPumping = false
+}
+
+/** Run a callback once the main thread is idle (bounded, so diagrams cannot
+ * starve forever while the page stays busy). */
+function whenIdle(callback: () => void): void {
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(() => { callback() }, { timeout: 400 })
+    return
+  }
+  setTimeout(callback, 0)
+}
+
+/**
+ * Drain the render queue one diagram at a time.
+ *
+ * Rendering every fence of a document in one commit (the behaviour this
+ * replaced) could hold the main thread for minutes on diagram-heavy documents
+ * — long enough for the desktop shell's surface watchdog to declare the page
+ * unresponsive and kill it. The queue interleaves a visible diagram ahead of
+ * the background ones and gives the browser (input, layout, the watchdog's
+ * probe) a turn between two renders, so a document with dozens of diagrams
+ * stays interactive and every diagram still ends up rendered.
+ */
+async function drainMermaidQueue(): Promise<void> {
+  if (mermaidPumping) return
+  mermaidPumping = true
+  const epoch = mermaidQueueEpoch
+  try {
+    while (epoch === mermaidQueueEpoch && mermaidQueue.length > 0) {
+      mermaidQueue.sort((a, b) => a.priority - b.priority)
+      const task = mermaidQueue.shift()
+      if (task === undefined) break
+      await new Promise<void>((resolve) => { whenIdle(resolve) })
+      if (epoch !== mermaidQueueEpoch) break
+      try {
+        await task.run()
+      } catch (error) {
+        // One broken fence must not stall the queue behind it.
+        console.error('[dsh-better-sidebar] mermaid render failed', error)
+      }
+      await new Promise<void>((resolve) => { setTimeout(resolve, 16) })
+    }
+  } finally {
+    if (epoch === mermaidQueueEpoch) mermaidPumping = false
+  }
+}
+
+/** Queue one diagram render; {@link drainMermaidQueue} runs it. */
+function pushMermaidTask(priority: MermaidPriority, run: () => Promise<void>): void {
+  mermaidQueue.push({ priority, run })
+  void drainMermaidQueue()
+}
+
+/** True when the block is at most about one viewport away from the visible
+ *  area. A mounted-but-hidden body (parked tab, closed drawer) has a zero box;
+ *  it is treated as off-screen so its diagrams take the idle path. */
+function isNearViewport(node: HTMLElement): boolean {
+  const rect = node.getBoundingClientRect()
+  if (rect.width === 0 && rect.height === 0) return false
+  const margin = window.innerHeight * 1.25
+  return rect.bottom > -margin && rect.top < window.innerHeight + margin
+}
+
+/** Rough first-paint height for the placeholder, derived from the fence's line
+ * count. Reserving some height keeps the article from jumping under the
+ * reader's cursor when the diagram arrives. */
+function placeholderHeight(code: string): number {
+  const lines = code.split('\n').length
+  return Math.min(480, Math.max(120, lines * 14))
 }
 
 /** First lines of a mermaid error (its dumps are huge; the head explains). */
@@ -228,33 +300,74 @@ function MermaidDiagram({ code }: { code: string }): React.ReactNode {
   /** The cloned svg shown in the zoom modal (null = closed). */
   const [zoomSvg, setZoomSvg] = useState<SVGSVGElement | null>(null)
   const copyTimer = useRef<number | undefined>(undefined)
+  /** The wrapper the visibility observer watches; also the placeholder host. */
+  const wrapRef = useRef<HTMLDivElement>(null)
+  /** Bumped whenever the source/theme changes or the component unmounts; a
+   * render result belonging to an older generation is dropped. */
+  const generationRef = useRef(0)
+  /** Generation whose render is already queued (one task per generation). */
+  const scheduledRef = useRef(-1)
 
   useEffect(() => subscribeColorScheme(() => { setDark(isDarkScheme()) }), [])
 
+  /** Render the current source and publish the sanitized SVG. */
+  const renderNow = useCallback(async (): Promise<void> => {
+    const generation = generationRef.current
+    const theme: MermaidTheme = dark ? 'dark' : 'default'
+    try {
+      const rendered = await renderMermaidDiagram(code, theme)
+      if (generation !== generationRef.current) return
+      const clean = sanitizeSvg(rendered)
+      if (clean === '') {
+        // Parse/sanitize rejection: never pass the raw string through.
+        setError(t('mermaidError'))
+        return
+      }
+      setSvg(clean)
+    } catch (reason) {
+      if (generation !== generationRef.current) return
+      setError(summarizeError(reason))
+    }
+  }, [code, dark])
+
+  /** Queue one render of the current generation: a visible diagram goes
+   * first, the rest render on the idle path. */
+  const scheduleRender = useCallback((priority: MermaidPriority): void => {
+    const generation = generationRef.current
+    if (scheduledRef.current === generation) return
+    scheduledRef.current = generation
+    pushMermaidTask(priority, async () => {
+      if (generation !== generationRef.current) return
+      await renderNow()
+    })
+  }, [renderNow])
+
+  // A new source or theme invalidates what is on screen and schedules a render.
   useEffect(() => {
-    let cancelled = false
+    generationRef.current += 1
+    scheduledRef.current = -1
     setSvg(null)
     setError(null)
-    if (code.trim() === '') return () => { cancelled = true }
-    configureMermaid()
-    const id = `dsh-md-mermaid-${mermaidSeq += 1}`
-    mermaid.render(id, code)
-      .then(({ svg: rendered }) => {
-        if (cancelled) return
-        const clean = sanitizeSvg(rendered)
-        if (clean === '') {
-          // Parse/sanitize rejection: never pass the raw string through.
-          setError(t('mermaidError'))
-          return
-        }
-        setSvg(clean)
-      })
-      .catch((reason: unknown) => {
-        if (cancelled) return
-        setError(summarizeError(reason))
-      })
-    return () => { cancelled = true }
-  }, [code, dark])
+    if (code.trim() === '') return
+    const node = wrapRef.current
+    scheduleRender(node !== null && isNearViewport(node) ? 0 : 1)
+  }, [code, dark, scheduleRender])
+
+  // A placeholder that scrolls into view jumps ahead of the background queue.
+  useEffect(() => {
+    const node = wrapRef.current
+    if (node === null || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      observer.disconnect()
+      scheduleRender(0)
+    }, { rootMargin: '800px 0px' })
+    observer.observe(node)
+    return () => { observer.disconnect() }
+  }, [scheduleRender])
+
+  // Unmounting the preview drops renders that are still queued.
+  useEffect(() => () => { generationRef.current += 1 }, [])
 
   const onCopy = useCallback(() => {
     if (copied) return
@@ -279,7 +392,7 @@ function MermaidDiagram({ code }: { code: string }): React.ReactNode {
   }
 
   return (
-    <div className={css.mermaidWrap}>
+    <div className={css.mermaidWrap} ref={wrapRef}>
       <div className={css.mermaidHeader}>
         <span className={css.mermaidInfo}>mermaid</span>
         <button
@@ -293,6 +406,18 @@ function MermaidDiagram({ code }: { code: string }): React.ReactNode {
           <span>{copied ? t('copied') : t('copy')}</span>
         </button>
       </div>
+      {svg === null && error === null && (
+        <div
+          className={css.mermaidPending}
+          style={{ minHeight: `${placeholderHeight(code)}px` }}
+          data-mermaid-pending
+          aria-busy="true"
+        >
+          <span className={css.mermaidPendingBar} />
+          <span className={css.mermaidPendingBar} />
+          <span className={css.mermaidPendingBar} />
+        </div>
+      )}
       {error !== null && <div className={css.mermaidError} title={error}>{t('mermaidError')}</div>}
       {svg !== null && (
         <div
