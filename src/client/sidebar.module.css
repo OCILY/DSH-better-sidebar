@@ -1858,6 +1858,15 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
   border-radius: 6px;
   background: var(--dsw-alias-bg-layer-1);
   overflow: hidden;
+  /* Scroll performance: a rendered diagram is a large SVG. Skip layout and
+     paint for the diagrams outside the viewport (a diagram-heavy article can
+     hold dozens) and remember the measured height once a block has been on
+     screen, so scrolling past already-rendered diagrams costs nothing. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+  /* Isolate the box: a diagram landing must not invalidate the layout or paint
+     of the surrounding article. */
+  contain: layout paint style;
 }
 
 .mermaidHeader {
