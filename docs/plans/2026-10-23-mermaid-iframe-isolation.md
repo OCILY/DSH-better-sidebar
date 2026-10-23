@@ -96,6 +96,38 @@ tsdown 之前生成；git 源安装走 `prepare`，因此同样可用。
 - 占位骨架 `.mermaidPending` / `.mermaidPendingBar`：按围栏行数预留高度，主题 token、
   `prefers-reduced-motion` 下停止动画，图到达时文章不跳动。
 
+### 3.4 滚动与多页签开销：渲染让位于交互
+
+第一版（3.1–3.3）解决了冻结与单图耗时，但真机反馈「加载后滚动仍不够流畅」。滚动路径上
+剩余的开销来自五处，均已处理：
+
+- **滚动期间后台渲染**：队列原先在滚动时仍按 `requestIdleCallback` 补齐剩余图，每次图
+  落地都要注入 SVG、跑 DOM pass、触发布局——滚动中每 100–300 ms 撞一次就会掉帧。现在
+  全局捕获 `scroll`（passive capture），队列对**后台优先级**任务等待「停止滚动 350 ms」
+  后再继续；滚动时进入视口的图仍按需即时渲染。
+- **隐藏页签空转**：原生 tab `keepMounted`，隐藏预览若继续补渲染，会与可见文档抢主线程。
+  每个预览注册可见性 handle（`IntersectionObserver`，初始按容器盒判断），队列只调度
+  `owner.visible` 的任务；隐藏页签的图保持占位，切回时 `wake()` 继续。预览卸载时
+  `dropPreviewTasks()` 清掉它的待渲染任务。
+- **mutation 全量扫描**：`runInlineHtmlPass` 与 `prepareMarkdownAnchors` 原先每次 DOM
+  mutation 后跑一遍全文扫描（真机实测 8–15 ms/次；31 张图落地 = 几十次扫描）。现在
+  80 ms 合并一次（`setTimeout` coalesce，卸载时清理计时器），并在页面隐藏时跳过扫描。
+- **打开瞬间的强制布局**：原实现每张图在 effect 里各自 `getBoundingClientRect()`，且与
+  其它图的 DOM 写入交错 → 每张图一次强制布局。现在 `MermaidMarkdown` 的 layout effect
+  先批量读所有 mermaid 块的 rect（一次读相位），再统一做替换/挂载（一次写相位），优先级
+  通过 `initiallyNearViewport` prop 传给图组件。
+- **视口外 SVG 的布局/绘制**：`.mermaidWrap` 加 `content-visibility: auto` +
+  `contain-intrinsic-size: auto 240px` + `contain: layout paint style`；已渲染的图滚出
+  视口后不再参与布局与绘制（`auto` 会记住实测高度；首次进入前的估算只影响滚动条的初始
+  长度）。
+
+### 3.5 加载策略（打开速度）
+
+- 懒 chunk 只在文档含 mermaid fence 时加载；iframe 在首次渲染时才创建，之后复用。
+- 首屏同步渲染 Markdown（真机 commit ≈ 45 ms），图表先出占位骨架（按围栏行数预留高度），
+  视口内/近视口的图优先渲染（初始优先级来自 3.4 的批量 rect 读取）。
+- 其余图不阻塞阅读：滚动时暂停，停止滚动后按空闲槽补齐；隐藏页签不参与。
+
 ## 4. 实测结果（同机、同文档、31 图）
 
 | 指标 | 修复前 | 修复后 |
@@ -119,11 +151,15 @@ tsdown 之前生成；git 源安装走 `prepare`，因此同样可用。
 - **可进一步压缩**：把 UMD 换成本项目 rolldown 构建的 minify chunk 可去重依赖
   （当前内联 3.4 MB minified UMD，已比原 7.04 MB 非压缩 chunk 小）；但需新增
   chunk 名与 5 处镜像，超出本修复范围。
-- **仍受主线程调度影响**：图多时后台渲染会占用若干秒 CPU，但每次让出主线程，不触发
-  看门狗；滚动时新进入视口的图会插队。
+- **仍受主线程调度影响**：图多时后台渲染会占用若干秒 CPU，但每次让出主线程、滚动手势
+  优先（见 3.4），不触发看门狗；滚动停止后或图进入视口时才补齐。
 - **测试限制**：jsdom 无法跑真实 iframe/blob，spec 通过
   `setMermaidFrameRendererForTests()` 注入 stub；iframe 行为由真实挂载 lane
   （`diagram.md` 冒烟）覆盖。
+- **隐藏页签仍保留整份预览 DOM**：宿主原生 tab 的 `keepMounted` 约定下，隐藏的
+  Markdown 预览 DOM 不会释放（本修复让它们不再渲染图表、不再参与滚动，内存仍在）。
+  要再降内存需要在可见性变化时卸载/重建正文，这会牵涉滚动位置、编辑态与宿主 tab
+  契约，留作后续（见 AGENTS 稳态开销约定）。
 
 ## 6. 验证清单
 
@@ -131,4 +167,6 @@ tsdown 之前生成；git 源安装走 `prepare`，因此同样可用。
 - [x] 单图/总耗时测量（30–104 ms / ~5 s）
 - [x] 占位 → 图替换、失败 → 源码兜底、多围栏全量渲染、跨围栏引用语义
 - [x] 生成资产结构（两段内联脚本、严格 safe 转义、strict 配置）
-- [x] `pnpm typecheck` / `pnpm lint` / `pnpm build` / `pnpm test` / `check:consumer-types`
+- [x] 滚动手势优先：滚动期间暂停后台渲染、隐藏页签不调度、mutation pass 合并、
+      批量 rect 读取、视口外图表 content-visibility
+- [x] `pnpm typecheck` / `pnpm lint` / `pnpm build` / 相关 spec 全绿
